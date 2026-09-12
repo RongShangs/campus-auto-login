@@ -95,7 +95,7 @@ def default_config_doc() -> dict[str, Any]:
     return {
         "_说明1": "首次运行自动生成。请用记事本修改后保存，再重新启动程序。",
         "_说明2": "password 必填校园网密码；username 为学号/工号（不要带 @dx）。",
-        "_说明3": "device_mode: pc=电脑UA / android=安卓UA / 留空字符串则每次启动弹窗选择。",
+        "_说明3": "device_mode: pc=电脑 / android=安卓。弹窗选择后会自动写回这里。",
         "_说明4": "portal_host 一般为 192.168.200.2；portal_port 一般为 801。",
         "_说明5": "account_suffixes 为运营商后缀，校园电信常用 @dx，备选 @telecom。",
         "username": s.username,
@@ -120,12 +120,30 @@ def write_default_config(path: Path) -> None:
     )
 
 
+def save_device_mode(path: Path, mode: str) -> None:
+    """把 UI/命令行选定的设备类型写回配置，避免下次又变回 PC。"""
+    try:
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        else:
+            raw = default_config_doc()
+        raw["device_mode"] = mode
+        path.write_text(
+            json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        log("INFO", f"已把 device_mode={mode} 写入 {path}")
+    except Exception as exc:  # noqa: BLE001
+        log("WARN", f"写回 device_mode 失败: {exc}")
+
+
 def load_settings(path: Path) -> AppSettings:
     if not path.exists():
         write_default_config(path)
         return AppSettings()
 
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    # utf-8-sig: 兼容记事本另存为 UTF-8 with BOM
+    raw = json.loads(path.read_text(encoding="utf-8-sig"))
     base = asdict(AppSettings())
     for key in base:
         if key in raw and raw[key] is not None:
@@ -332,12 +350,16 @@ def http_request(
 # 登录
 # ---------------------------------------------------------------------------
 def login_acsetting(settings: AppSettings, device: DeviceProfile) -> bool:
+    # R6: Dr.COM 手机终端标记（0=PC，1=手机）
+    r6 = "1" if device.key == "android" else "0"
+    log("INFO", f"[ACSetting] device={device.key} R6={r6} UA={device.ua[:48]}...")
     for suffix in settings.account_suffixes:
         account = f"{settings.username}{suffix}"
         payload = {
             "DDDDD": account,
             "upass": settings.password,
             "0MKKey": "123456",
+            "R6": r6,
         }
         log("INFO", f"[ACSetting] 尝试账号 {account}")
         if DRY_RUN:
@@ -345,6 +367,7 @@ def login_acsetting(settings: AppSettings, device: DeviceProfile) -> bool:
                 "DDDDD": account,
                 "upass": _redact_secret(settings.password),
                 "0MKKey": "***",
+                "R6": r6,
             }
             log("INFO", f"[ACSetting][DRY-RUN] 跳过 POST payload={safe}")
             continue
@@ -439,22 +462,29 @@ def attempt_login(settings: AppSettings, device: DeviceProfile) -> bool:
         f"开始登录 carrier={settings.carrier_label} device={device.label} "
         f"user={settings.username} portal={settings.portal_host}",
     )
+    log(
+        "INFO",
+        f"账号前缀={device.account_prefix!r} UA 含Android={'Android' in device.ua}",
+    )
 
-    ok = login_acsetting(settings, device)
-    if ok and not DRY_RUN:
-        time.sleep(2)
-        if probe_network(settings):
-            log("INFO", "ACSetting 登录后探测成功")
-            return True
-        log("WARN", "ACSetting 报成功但探测仍失败，尝试 Portal")
+    # 安卓优先走 Portal（,1, 前缀才真正区分手机）；电脑优先 ACSetting
+    if device.key == "android":
+        order = (login_portal, login_acsetting)
+        order_names = ("Portal", "ACSetting")
+    else:
+        order = (login_acsetting, login_portal)
+        order_names = ("ACSetting", "Portal")
 
-    ok = login_portal(settings, device)
-    if ok and not DRY_RUN:
-        time.sleep(2)
-        if probe_network(settings):
-            log("INFO", "Portal 登录后探测成功")
-            return True
-        log("WARN", "Portal 报成功但探测仍失败")
+    for fn, name in zip(order, order_names):
+        ok = fn(settings, device)
+        if ok and not DRY_RUN:
+            time.sleep(2)
+            if probe_network(settings):
+                log("INFO", f"{name} 登录后探测成功")
+                return True
+            log("WARN", f"{name} 报成功但探测仍失败，尝试下一协议")
+        if ok and DRY_RUN:
+            log("INFO", f"DRY-RUN: {name} 路径已演练")
 
     if DRY_RUN:
         log("INFO", "DRY-RUN 结束（未发送真实认证）")
@@ -539,9 +569,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def resolve_device(settings: AppSettings, cli_device: Optional[str]) -> DeviceProfile:
+def resolve_device(
+    settings: AppSettings, cli_device: Optional[str], cfg_path: Path
+) -> DeviceProfile:
     if cli_device:
         log("INFO", f"命令行覆盖设备类型: {cli_device}")
+        save_device_mode(cfg_path, cli_device)
         return DEVICES[cli_device]
     mode = (settings.device_mode or "").strip().lower()
     if mode in DEVICES:
@@ -549,6 +582,7 @@ def resolve_device(settings: AppSettings, cli_device: Optional[str]) -> DevicePr
         return DEVICES[mode]
     key = pick_device_interactive()
     log("INFO", f"用户选择设备类型: {DEVICES[key].label}")
+    save_device_mode(cfg_path, key)
     return DEVICES[key]
 
 
@@ -580,7 +614,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         log("INFO", f"加载配置: {cfg}")
 
-    device = resolve_device(settings, args.device)
+    device = resolve_device(settings, args.device, cfg)
 
     if args.once:
         ok = probe_network(settings)
