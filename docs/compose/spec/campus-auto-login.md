@@ -79,7 +79,8 @@ Windows 本机在校园网环境下，断网或认证失效后需要人工打开
 - **电脑 PC**：`User-Agent` 为桌面 Chrome；Portal 协议账号前缀 `,0,`
 - **安卓移动设备**：`User-Agent` 为 Android Chrome；Portal 协议账号前缀 `,1,`
 
-也可用命令行 `--device pc|android` 跳过弹窗；默认弹窗，选完进入监控循环。
+也可用命令行 `--device pc|android` 跳过弹窗；选择会写回 config.json 的 `device_mode`。
+安卓登录时：Portal 优先（账号前缀 `,1,`），ACSetting 附带 `R6=1`（手机终端标记）。
 
 ### 配置文件（config.json）
 首次运行在 **exe 同目录**（源码运行则为脚本同目录）生成 `config.json`，用记事本填写后重启生效：
