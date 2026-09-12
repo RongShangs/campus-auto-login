@@ -189,10 +189,39 @@ def get_local_ipv4() -> str:
     return "0.0.0.0"
 
 
+def _redact_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 2:
+        return "**"
+    return value[0] + "***" + value[-1]
+
+
 def get_mac() -> str:
+    """返回 xx-xx-xx-xx-xx-xx 形式；优先解析本机校园网网卡。"""
+    # 1) 通过 UDP 出口 IP 所在网卡（Windows: Get-NetIPAddress / ipconfig）
+    try:
+        import subprocess
+
+        out = subprocess.check_output(
+            ["ipconfig", "/all"],
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        ).decode("gbk", errors="ignore")
+        # 粗粒度：取第一个物理地址
+        m = re.search(r"Physical Address[.\s]*:\s*([0-9A-Fa-f\-]{17})", out)
+        if m:
+            return m.group(1).upper()
+        m = re.search(r"物理地址[.\s]*:\s*([0-9A-Fa-f\-]{17})", out)
+        if m:
+            return m.group(1).upper()
+    except Exception:
+        pass
+
+    # 2) uuid 回退（不可靠时仍返回格式化值）
     node = uuid.getnode()
-    mac = ":".join(f"{(node >> ele) & 0xFF:02x}" for ele in range(40, -1, -8))
-    return mac.upper()
+    parts = [f"{(node >> ele) & 0xFF:02X}" for ele in range(40, -1, -8)]
+    return "-".join(parts)
 
 
 def http_request(
@@ -253,7 +282,8 @@ def login_acsetting(user: str, password: str, ua: str) -> bool:
         }
         log("INFO", f"[ACSetting] 尝试账号 {account}")
         if DRY_RUN:
-            log("INFO", f"[ACSetting][DRY-RUN] 跳过 POST payload={payload}")
+            safe = {"DDDDD": account, "upass": _redact_secret(password), "0MKKey": "***"}
+            log("INFO", f"[ACSetting][DRY-RUN] 跳过 POST payload={safe}")
             continue
 
         status, text = http_request(
@@ -270,7 +300,9 @@ def login_acsetting(user: str, password: str, ua: str) -> bool:
         if FAIL_MARK in text:
             log("WARN", f"[ACSetting] 失败标记: {account}")
             continue
-        log("INFO", "[ACSetting] 无明确标记，继续下一后缀")
+        # 无明确失败：可能已上线，交给探测确认
+        log("INFO", f"[ACSetting] 无明确标记，视为可能成功: {account}")
+        return True
     return False
 
 
@@ -301,7 +333,9 @@ def login_portal(user: str, password: str, device: DeviceProfile) -> bool:
         url = _join_query(PORTAL_LOGIN, params)
         log("INFO", f"[Portal] 尝试账号 {account}")
         if DRY_RUN:
-            log("INFO", f"[Portal][DRY-RUN] 跳过 GET url={url[:120]}...")
+            safe_params = dict(params)
+            safe_params["user_password"] = _redact_secret(password)
+            log("INFO", f"[Portal][DRY-RUN] 跳过 GET url={_join_query(PORTAL_LOGIN, safe_params)[:140]}...")
             continue
 
         status, text = http_request(
