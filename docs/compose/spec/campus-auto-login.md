@@ -1,14 +1,25 @@
 ---
 feature: campus-auto-login
-status: designed
+status: delivered
 updated: 2026-09-12
 branch: feat/campus-auto-login
-commits:
+commits: 7f0fc10..e27dd7b
 ---
 
 # 校园网自动登录监控
 
 ## Report
+
+**What was built** — 一个 Windows 常驻监控程序：每 10 秒探测 `http://www.msftconnecttest.com/connecttest.txt`，连续失败达到阈值后按「校园电信」自动登录 Dr.COM。登录顺序为 ACSetting POST → Portal JSONP，后缀依次尝试 `@dx`、`@telecom`。启动时可用 tkinter 选择设备类型（电脑 PC / 安卓），也可用 `--device pc|android` 跳过弹窗；Portal 账号前缀分别为 `,0,` / `,1,`。交付源码 `src/campus_auto_login.py` 与单文件 `dist/campus_auto_login.exe`。绝不调用注销接口；dry-run 日志会对密码脱敏。
+
+**Verification** — `python -m py_compile` PASS；`--once` 探测 PASS；`--login-once --dry-run`（pc/android）PASS 且日志无明文密码；PyInstaller 打包 PASS，`dist/campus_auto_login.exe --help` / `--once` PASS。评审 critical（密码进日志、MAC 格式）已修复并重打包。
+
+**Journey log**
+1. 实测门户为 Dr.COM 哆点；loginMethod=1（Portal），但保留更简单的 ACSetting 作首选。
+2. 当前在线 uid 为 `@telecom`，页面运营商配置为 `@dx`，故双后缀回退。
+3. 不对 `192.168.200.2` 发 Logout/真实改密类请求，避免踢下线。
+4. dry-run 曾打印完整 payload，评审判 critical 后改为脱敏。
+5. 本机 IP 先误取 198.18.x，改为优先连认证主机取校园网地址 10.16.18.21。
 
 ## [S1] Problem
 Windows 本机在校园网环境下，断网或认证失效后需要人工打开 `http://192.168.200.2`，勾选「校园电信」并输入账号密码。需要一个后台程序每 10 秒探测公网连通性，异常时自动用预设账号登录 Dr.COM 认证系统，恢复上网。
@@ -94,9 +105,9 @@ Windows 本机在校园网环境下，断网或认证失效后需要人工打开
 - 不修改学校认证服务器任何数据
 
 ## Tasks
-- [ ] T1: 实现 `src/campus_auto_login.py` 探测与主循环 — acceptance: 脚本可独立运行，每 10s 探测并打印状态；异常时进入登录流程 (covers: S2)
-- [ ] T2: 实现 ACSetting / Portal 双协议登录与后缀回退 — acceptance: 函数按序尝试 @dx/@telecom；不调用 Logout；成功判定符合 S2 (covers: S2)
-- [ ] T3: PyInstaller 打包 exe — acceptance: `dist/campus_auto_login.exe` 可双击或命令行启动 (covers: S2)
-- [ ] T4: 启动时设备类型选择（PC/安卓）— acceptance: 无 `--device` 时弹出选项；`--device pc|android` 可无交互；UA 与 Portal 前缀随选择切换 (covers: S2)
-- [ ] T5: 静态验证与 dry-run — acceptance: 语法检查通过；在**不断网**条件下 dry-run 探测通过；登录函数可被调用但默认 dry-run 不发真实认证 (covers: S2; depends: T1, T2, T4)
-- [ ] T6: PyInstaller 打包 exe — acceptance: `dist/campus_auto_login.exe` 存在且 `--help` 可用 (covers: S2; depends: T1, T2, T4)
+- [x] T1: 实现 `src/campus_auto_login.py` 探测与主循环 — acceptance: 脚本可独立运行，每 10s 探测并打印状态；异常时进入登录流程 (covers: S2)
+- [x] T2: 实现 ACSetting / Portal 双协议登录与后缀回退 — acceptance: 函数按序尝试 @dx/@telecom；不调用 Logout；成功判定符合 S2 (covers: S2)
+- [x] T3: PyInstaller 打包 exe — acceptance: `dist/campus_auto_login.exe` 可双击或命令行启动 (covers: S2)
+- [x] T4: 启动时设备类型选择（PC/安卓）— acceptance: 无 `--device` 时弹出选项；`--device pc|android` 可无交互；UA 与 Portal 前缀随选择切换 (covers: S2)
+- [x] T5: 静态验证与 dry-run — acceptance: 语法检查通过；在**不断网**条件下 dry-run 探测通过；登录函数可被调用但默认 dry-run 不发真实认证 (covers: S2; depends: T1, T2, T4)
+- [x] T6: 评审修复：密码脱敏与 MAC 格式 — acceptance: dry-run 日志无明文密码；MAC 为 xx-xx-xx-xx-xx-xx (covers: S2)
