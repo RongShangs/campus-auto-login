@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """校园网 Dr.COM 自动登录监控（Windows）。
 
-每 10s 探测公网连通性；失败则按「校园电信」自动登录。
-绝不调用注销接口。
+首次运行会在程序同目录生成 config.json，填写账号/密码/UA/登录地址后重启即可。
+每 10s 探测公网；失败则自动登录。绝不调用注销接口。
 """
 from __future__ import annotations
 
@@ -17,32 +17,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Optional
 
-# ---------------------------------------------------------------------------
-# 配置（交付后请改密码）
-# ---------------------------------------------------------------------------
-CAMPUS_USER = "1686345"
-CAMPUS_PASS = "CHANGE_ME"  # TODO: 填入校园网密码
-
-CHECK_INTERVAL_SEC = 10
-FAIL_THRESHOLD = 2
-LOGIN_COOLDOWN_SEC = 30
-PROBE_URL = "http://www.msftconnecttest.com/connecttest.txt"
-PROBE_OK_TOKEN = "Microsoft Connect Test"
-
-PORTAL_HOST = "192.168.200.2"
-EPORTAL_BASE = f"http://{PORTAL_HOST}:801/eportal/"
-ACSETTING_LOGIN = f"{EPORTAL_BASE}?c=ACSetting&a=Login"
-PORTAL_LOGIN = f"{EPORTAL_BASE}?c=Portal&a=login"
-
-SUCCESS_MARK = "Dr.COMWebLoginID_3.htm"
-FAIL_MARK = "Dr.COMWebLoginID_2.htm"
-JS_VERSION = "3.3.3"
-
-# 运营商后缀：校园电信
-SUFFIXES = ("@dx", "@telecom")
+DRY_RUN = False
 
 UA_PC = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -53,7 +32,9 @@ UA_ANDROID = (
     "(KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
 )
 
-DRY_RUN = False
+SUCCESS_MARK = "Dr.COMWebLoginID_3.htm"
+FAIL_MARK = "Dr.COMWebLoginID_2.htm"
+JS_VERSION = "3.3.3"
 
 
 @dataclass(frozen=True)
@@ -61,13 +42,108 @@ class DeviceProfile:
     key: str
     label: str
     ua: str
-    account_prefix: str  # Portal 协议前缀
+    account_prefix: str
 
 
 DEVICES = {
     "pc": DeviceProfile("pc", "电脑 PC", UA_PC, ",0,"),
     "android": DeviceProfile("android", "安卓移动设备", UA_ANDROID, ",1,"),
 }
+
+
+@dataclass
+class AppSettings:
+    username: str = "1686345"
+    password: str = "CHANGE_ME"
+    device_mode: str = "pc"  # pc | android | ""(每次启动弹窗)
+    portal_host: str = "192.168.200.2"
+    portal_port: int = 801
+    check_interval_sec: int = 10
+    fail_threshold: int = 2
+    login_cooldown_sec: int = 30
+    probe_url: str = "http://www.msftconnecttest.com/connecttest.txt"
+    probe_ok_token: str = "Microsoft Connect Test"
+    account_suffixes: list[str] = field(default_factory=lambda: ["@dx", "@telecom"])
+    carrier_label: str = "校园电信"
+
+    @property
+    def eportal_base(self) -> str:
+        return f"http://{self.portal_host}:{self.portal_port}/eportal/"
+
+    @property
+    def acsetting_login(self) -> str:
+        return f"{self.eportal_base}?c=ACSetting&a=Login"
+
+    @property
+    def portal_login(self) -> str:
+        return f"{self.eportal_base}?c=Portal&a=login"
+
+
+def app_dir() -> Path:
+    """exe 旁目录；源码运行时为脚本所在目录。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def config_path() -> Path:
+    return app_dir() / "config.json"
+
+
+def default_config_doc() -> dict[str, Any]:
+    s = AppSettings()
+    return {
+        "_说明1": "首次运行自动生成。请用记事本修改后保存，再重新启动程序。",
+        "_说明2": "password 必填校园网密码；username 为学号/工号（不要带 @dx）。",
+        "_说明3": "device_mode: pc=电脑UA / android=安卓UA / 留空字符串则每次启动弹窗选择。",
+        "_说明4": "portal_host 一般为 192.168.200.2；portal_port 一般为 801。",
+        "_说明5": "account_suffixes 为运营商后缀，校园电信常用 @dx，备选 @telecom。",
+        "username": s.username,
+        "password": s.password,
+        "device_mode": s.device_mode,
+        "portal_host": s.portal_host,
+        "portal_port": s.portal_port,
+        "check_interval_sec": s.check_interval_sec,
+        "fail_threshold": s.fail_threshold,
+        "login_cooldown_sec": s.login_cooldown_sec,
+        "probe_url": s.probe_url,
+        "probe_ok_token": s.probe_ok_token,
+        "account_suffixes": list(s.account_suffixes),
+        "carrier_label": s.carrier_label,
+    }
+
+
+def write_default_config(path: Path) -> None:
+    path.write_text(
+        json.dumps(default_config_doc(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_settings(path: Path) -> AppSettings:
+    if not path.exists():
+        write_default_config(path)
+        return AppSettings()
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    base = asdict(AppSettings())
+    for key in base:
+        if key in raw and raw[key] is not None:
+            base[key] = raw[key]
+    # 清理后缀列表
+    suffixes = base.get("account_suffixes") or ["@dx", "@telecom"]
+    if isinstance(suffixes, str):
+        suffixes = [suffixes]
+    base["account_suffixes"] = [str(x) for x in suffixes]
+    device = str(base.get("device_mode") or "").strip().lower()
+    if device not in ("", "pc", "android"):
+        device = "pc"
+    base["device_mode"] = device
+    base["portal_port"] = int(base["portal_port"])
+    base["check_interval_sec"] = int(base["check_interval_sec"])
+    base["fail_threshold"] = int(base["fail_threshold"])
+    base["login_cooldown_sec"] = int(base["login_cooldown_sec"])
+    return AppSettings(**base)
 
 
 def log(level: str, msg: str) -> None:
@@ -80,11 +156,27 @@ def _join_query(url: str, params: dict) -> str:
     return url + sep + urllib.parse.urlencode(params)
 
 
+def _redact_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 2:
+        return "**"
+    return value[0] + "***" + value[-1]
+
+
+def _decode_body(raw: bytes) -> str:
+    for enc in ("utf-8", "gb2312", "gbk", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 # ---------------------------------------------------------------------------
 # 设备选择 UI
 # ---------------------------------------------------------------------------
 def pick_device_interactive() -> str:
-    """启动时让用户选择 PC / 安卓。无 GUI 环境时回退控制台输入。"""
     try:
         import tkinter as tk
         from tkinter import ttk
@@ -96,11 +188,9 @@ def pick_device_interactive() -> str:
 
         frm = ttk.Frame(root, padding=16)
         frm.grid()
-
         ttk.Label(frm, text="请选择登录请求的设备类型（User-Agent）").grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
-
         var = tk.StringVar(value="pc")
         ttk.Radiobutton(
             frm, text="电脑 PC（前缀 ,0,）", variable=var, value="pc"
@@ -116,7 +206,6 @@ def pick_device_interactive() -> str:
         ttk.Button(frm, text="开始监控", command=on_ok).grid(
             row=3, column=0, columnspan=2, pady=(12, 0)
         )
-
         root.protocol("WM_DELETE_WINDOW", on_ok)
         root.mainloop()
         return result["device"] or "pc"
@@ -131,11 +220,11 @@ def pick_device_interactive() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 网络探测
+# 网络 / 本机信息
 # ---------------------------------------------------------------------------
-def probe_network(timeout: float = 5.0) -> bool:
+def probe_network(settings: AppSettings, timeout: float = 5.0) -> bool:
     req = urllib.request.Request(
-        PROBE_URL,
+        settings.probe_url,
         headers={
             "User-Agent": UA_PC,
             "Cache-Control": "no-cache",
@@ -146,26 +235,21 @@ def probe_network(timeout: float = 5.0) -> bool:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read(256).decode("utf-8", errors="ignore")
-            return resp.status == 200 and PROBE_OK_TOKEN in body
+            return resp.status == 200 and settings.probe_ok_token in body
     except Exception:
         return False
 
 
-# ---------------------------------------------------------------------------
-# 本机 IP / MAC
-# ---------------------------------------------------------------------------
 def _is_usable_ipv4(ip: str) -> bool:
     if not ip or ip.startswith("127.") or ip == "0.0.0.0":
         return False
-    # 排除保留/基准测试段（如 198.18.0.0/15）
     if ip.startswith("198.18.") or ip.startswith("198.19."):
         return False
     return True
 
 
-def get_local_ipv4() -> str:
-    # 优先连到认证主机，拿真实校园网出口 IP
-    for target in ((PORTAL_HOST, 80), ("223.5.5.5", 53), ("8.8.8.8", 53)):
+def get_local_ipv4(portal_host: str) -> str:
+    for target in ((portal_host, 80), ("223.5.5.5", 53), ("8.8.8.8", 53)):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.settimeout(2)
@@ -177,7 +261,6 @@ def get_local_ipv4() -> str:
             pass
         finally:
             s.close()
-
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
@@ -189,17 +272,7 @@ def get_local_ipv4() -> str:
     return "0.0.0.0"
 
 
-def _redact_secret(value: str) -> str:
-    if not value:
-        return ""
-    if len(value) <= 2:
-        return "**"
-    return value[0] + "***" + value[-1]
-
-
 def get_mac() -> str:
-    """返回 xx-xx-xx-xx-xx-xx 形式；优先解析本机校园网网卡。"""
-    # 1) 通过 UDP 出口 IP 所在网卡（Windows: Get-NetIPAddress / ipconfig）
     try:
         import subprocess
 
@@ -208,7 +281,6 @@ def get_mac() -> str:
             timeout=5,
             stderr=subprocess.DEVNULL,
         ).decode("gbk", errors="ignore")
-        # 粗粒度：取第一个物理地址
         m = re.search(r"Physical Address[.\s]*:\s*([0-9A-Fa-f\-]{17})", out)
         if m:
             return m.group(1).upper()
@@ -217,8 +289,6 @@ def get_mac() -> str:
             return m.group(1).upper()
     except Exception:
         pass
-
-    # 2) uuid 回退（不可靠时仍返回格式化值）
     node = uuid.getnode()
     parts = [f"{(node >> ele) & 0xFF:02X}" for ele in range(40, -1, -8)]
     return "-".join(parts)
@@ -247,9 +317,7 @@ def http_request(
     req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            text = _decode_body(raw)
-            return resp.status, text
+            return resp.status, _decode_body(resp.read())
     except urllib.error.HTTPError as e:
         try:
             text = _decode_body(e.read())
@@ -260,37 +328,32 @@ def http_request(
         return 0, str(e)
 
 
-def _decode_body(raw: bytes) -> str:
-    for enc in ("utf-8", "gb2312", "gbk", "latin-1"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace")
-
-
 # ---------------------------------------------------------------------------
-# 登录：ACSetting POST
+# 登录
 # ---------------------------------------------------------------------------
-def login_acsetting(user: str, password: str, ua: str) -> bool:
-    for suffix in SUFFIXES:
-        account = f"{user}{suffix}"
+def login_acsetting(settings: AppSettings, device: DeviceProfile) -> bool:
+    for suffix in settings.account_suffixes:
+        account = f"{settings.username}{suffix}"
         payload = {
             "DDDDD": account,
-            "upass": password,
+            "upass": settings.password,
             "0MKKey": "123456",
         }
         log("INFO", f"[ACSetting] 尝试账号 {account}")
         if DRY_RUN:
-            safe = {"DDDDD": account, "upass": _redact_secret(password), "0MKKey": "***"}
+            safe = {
+                "DDDDD": account,
+                "upass": _redact_secret(settings.password),
+                "0MKKey": "***",
+            }
             log("INFO", f"[ACSetting][DRY-RUN] 跳过 POST payload={safe}")
             continue
 
         status, text = http_request(
-            ACSETTING_LOGIN,
+            settings.acsetting_login,
             method="POST",
             data=payload,
-            headers={"User-Agent": ua},
+            headers={"User-Agent": device.ua},
             timeout=8.0,
         )
         log("INFO", f"[ACSetting] HTTP {status} len={len(text)}")
@@ -300,27 +363,23 @@ def login_acsetting(user: str, password: str, ua: str) -> bool:
         if FAIL_MARK in text:
             log("WARN", f"[ACSetting] 失败标记: {account}")
             continue
-        # 无明确失败：可能已上线，交给探测确认
         log("INFO", f"[ACSetting] 无明确标记，视为可能成功: {account}")
         return True
     return False
 
 
-# ---------------------------------------------------------------------------
-# 登录：Portal JSONP
-# ---------------------------------------------------------------------------
-def login_portal(user: str, password: str, device: DeviceProfile) -> bool:
-    ip = get_local_ipv4()
+def login_portal(settings: AppSettings, device: DeviceProfile) -> bool:
+    ip = get_local_ipv4(settings.portal_host)
     mac = get_mac()
     log("INFO", f"[Portal] 本机 IP={ip} MAC={mac} device={device.key}")
 
-    for suffix in SUFFIXES:
-        account = f"{device.account_prefix}{user}{suffix}"
+    for suffix in settings.account_suffixes:
+        account = f"{device.account_prefix}{settings.username}{suffix}"
         callback = f"dr{random.randint(1000, 99999)}"
         params = {
             "login_method": "1",
             "user_account": account,
-            "user_password": password,
+            "user_password": settings.password,
             "wlan_user_ip": ip,
             "wlan_user_ipv6": "",
             "wlan_user_mac": mac,
@@ -330,16 +389,19 @@ def login_portal(user: str, password: str, device: DeviceProfile) -> bool:
             "callback": callback,
             "v": str(random.randint(500, 10000)),
         }
-        url = _join_query(PORTAL_LOGIN, params)
         log("INFO", f"[Portal] 尝试账号 {account}")
         if DRY_RUN:
             safe_params = dict(params)
-            safe_params["user_password"] = _redact_secret(password)
-            log("INFO", f"[Portal][DRY-RUN] 跳过 GET url={_join_query(PORTAL_LOGIN, safe_params)[:140]}...")
+            safe_params["user_password"] = _redact_secret(settings.password)
+            log(
+                "INFO",
+                f"[Portal][DRY-RUN] 跳过 GET "
+                f"{_join_query(settings.portal_login, safe_params)[:140]}...",
+            )
             continue
 
         status, text = http_request(
-            url,
+            _join_query(settings.portal_login, params),
             method="GET",
             headers={"User-Agent": device.ua},
             timeout=8.0,
@@ -364,28 +426,32 @@ def login_portal(user: str, password: str, device: DeviceProfile) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# 登录编排
-# ---------------------------------------------------------------------------
-def attempt_login(user: str, password: str, device: DeviceProfile) -> bool:
-    if not password or password == "CHANGE_ME":
-        log("ERROR", "密码未配置，请修改脚本顶部 CAMPUS_PASS")
+def attempt_login(settings: AppSettings, device: DeviceProfile) -> bool:
+    if not settings.password or settings.password == "CHANGE_ME":
+        log(
+            "ERROR",
+            f"密码未配置：请编辑 {config_path()} 中的 password 字段",
+        )
         return False
 
-    log("INFO", f"开始登录 device={device.label} user={user}")
+    log(
+        "INFO",
+        f"开始登录 carrier={settings.carrier_label} device={device.label} "
+        f"user={settings.username} portal={settings.portal_host}",
+    )
 
-    ok = login_acsetting(user, password, device.ua)
+    ok = login_acsetting(settings, device)
     if ok and not DRY_RUN:
         time.sleep(2)
-        if probe_network():
+        if probe_network(settings):
             log("INFO", "ACSetting 登录后探测成功")
             return True
         log("WARN", "ACSetting 报成功但探测仍失败，尝试 Portal")
 
-    ok = login_portal(user, password, device)
+    ok = login_portal(settings, device)
     if ok and not DRY_RUN:
         time.sleep(2)
-        if probe_network():
+        if probe_network(settings):
             log("INFO", "Portal 登录后探测成功")
             return True
         log("WARN", "Portal 报成功但探测仍失败")
@@ -396,16 +462,19 @@ def attempt_login(user: str, password: str, device: DeviceProfile) -> bool:
     return False
 
 
-def main_loop(user: str, password: str, device: DeviceProfile) -> None:
+def main_loop(settings: AppSettings, device: DeviceProfile) -> None:
     fail_streak = 0
     last_login_ts = 0.0
 
-    log("INFO", f"监控启动 interval={CHECK_INTERVAL_SEC}s device={device.label}")
-    log("INFO", f"探测 URL: {PROBE_URL}")
+    log(
+        "INFO",
+        f"监控启动 interval={settings.check_interval_sec}s device={device.label}",
+    )
+    log("INFO", f"探测 URL: {settings.probe_url}")
     log("INFO", "安全约束: 不会调用注销接口")
 
     while True:
-        online = probe_network()
+        online = probe_network(settings)
         if online:
             if fail_streak:
                 log("INFO", "网络已恢复")
@@ -413,12 +482,14 @@ def main_loop(user: str, password: str, device: DeviceProfile) -> None:
             log("INFO", "网络正常")
         else:
             fail_streak += 1
-            log("WARN", f"网络异常 fail_streak={fail_streak}/{FAIL_THRESHOLD}")
-
+            log(
+                "WARN",
+                f"网络异常 fail_streak={fail_streak}/{settings.fail_threshold}",
+            )
             now = time.time()
-            cooling = now - last_login_ts < LOGIN_COOLDOWN_SEC
-            if fail_streak >= FAIL_THRESHOLD and not cooling:
-                success = attempt_login(user, password, device)
+            cooling = now - last_login_ts < settings.login_cooldown_sec
+            if fail_streak >= settings.fail_threshold and not cooling:
+                success = attempt_login(settings, device)
                 last_login_ts = time.time()
                 if success:
                     fail_streak = 0
@@ -428,7 +499,7 @@ def main_loop(user: str, password: str, device: DeviceProfile) -> None:
                 log("INFO", "登录冷却中，跳过")
 
         try:
-            time.sleep(CHECK_INTERVAL_SEC)
+            time.sleep(settings.check_interval_sec)
         except KeyboardInterrupt:
             log("INFO", "收到中断，退出")
             return
@@ -437,9 +508,13 @@ def main_loop(user: str, password: str, device: DeviceProfile) -> None:
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="校园网 Dr.COM 自动登录监控")
     p.add_argument(
+        "--config",
+        help="配置文件路径；默认程序同目录 config.json",
+    )
+    p.add_argument(
         "--device",
         choices=("pc", "android"),
-        help="设备类型；省略则启动时弹出选择",
+        help="覆盖配置中的 device_mode",
     )
     p.add_argument(
         "--dry-run",
@@ -456,39 +531,68 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="立即尝试一次登录后退出",
     )
+    p.add_argument(
+        "--init-config",
+        action="store_true",
+        help="仅生成默认 config.json（已存在则不覆盖）后退出",
+    )
     return p.parse_args(argv)
+
+
+def resolve_device(settings: AppSettings, cli_device: Optional[str]) -> DeviceProfile:
+    if cli_device:
+        log("INFO", f"命令行覆盖设备类型: {cli_device}")
+        return DEVICES[cli_device]
+    mode = (settings.device_mode or "").strip().lower()
+    if mode in DEVICES:
+        log("INFO", f"使用配置文件设备类型: {DEVICES[mode].label}")
+        return DEVICES[mode]
+    key = pick_device_interactive()
+    log("INFO", f"用户选择设备类型: {DEVICES[key].label}")
+    return DEVICES[key]
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     global DRY_RUN
-    # Windows 控制台中文输出
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
+
     args = parse_args(argv)
     DRY_RUN = bool(args.dry_run)
 
-    if args.device:
-        device = DEVICES[args.device]
-        log("INFO", f"使用命令行设备类型: {device.label}")
+    cfg = Path(args.config).expanduser().resolve() if args.config else config_path()
+    if args.init_config:
+        if cfg.exists():
+            log("INFO", f"配置已存在，不覆盖: {cfg}")
+        else:
+            write_default_config(cfg)
+            log("INFO", f"已生成配置: {cfg}")
+        return 0
+
+    created = not cfg.exists()
+    settings = load_settings(cfg)
+    if created:
+        log("INFO", f"首次运行，已生成配置文件: {cfg}")
+        log("INFO", "请用记事本打开并填写 password 等字段，然后重新启动程序。")
     else:
-        key = pick_device_interactive()
-        device = DEVICES[key]
-        log("INFO", f"用户选择设备类型: {device.label}")
+        log("INFO", f"加载配置: {cfg}")
+
+    device = resolve_device(settings, args.device)
 
     if args.once:
-        ok = probe_network()
+        ok = probe_network(settings)
         log("INFO", f"一次性探测结果: {'正常' if ok else '异常'}")
         return 0 if ok else 1
 
     if args.login_once:
-        ok = attempt_login(CAMPUS_USER, CAMPUS_PASS, device)
+        ok = attempt_login(settings, device)
         return 0 if ok else 1
 
     try:
-        main_loop(CAMPUS_USER, CAMPUS_PASS, device)
+        main_loop(settings, device)
     except KeyboardInterrupt:
         log("INFO", "退出")
     return 0

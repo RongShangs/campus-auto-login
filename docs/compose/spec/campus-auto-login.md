@@ -81,9 +81,22 @@ Windows 本机在校园网环境下，断网或认证失效后需要人工打开
 
 也可用命令行 `--device pc|android` 跳过弹窗；默认弹窗，选完进入监控循环。
 
-### 账号
-- 用户名常量：`CAMPUS_USER = "1686345"`
-- 密码常量：`CAMPUS_PASS = "CHANGE_ME"`（交付后由用户自行填写）
+### 配置文件（config.json）
+首次运行在 **exe 同目录**（源码运行则为脚本同目录）生成 `config.json`，用记事本填写后重启生效：
+
+| 字段 | 说明 | 默认 |
+|---|---|---|
+| username | 学号/工号，不带 @dx | 1686345 |
+| password | 校园网密码 | CHANGE_ME |
+| device_mode | `pc` / `android` / 空字符串则每次启动弹窗 | pc |
+| portal_host | 认证主机 | 192.168.200.2 |
+| portal_port | 认证端口 | 801 |
+| check_interval_sec | 探测间隔 | 10 |
+| fail_threshold | 连续失败阈值 | 2 |
+| login_cooldown_sec | 登录冷却 | 30 |
+| account_suffixes | 运营商后缀列表 | ["@dx","@telecom"] |
+
+`--config` 可指定路径；`--device` 可临时覆盖 device_mode。`config.json` 含密码，不提交 git。
 
 ### 本机信息获取
 - IPv4：`socket` 连出 UDP 探测网关，或 `psutil`/系统命令；优先零第三方依赖方案
